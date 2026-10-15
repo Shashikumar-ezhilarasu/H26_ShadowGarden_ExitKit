@@ -1,0 +1,964 @@
+{
+  "$defs": {
+    "ApiMappingItem": {
+      "additionalProperties": false,
+      "description": "Translation between an old symbol and its proposed replacement.",
+      "properties": {
+        "old_symbol": {
+          "title": "Old Symbol",
+          "type": "string"
+        },
+        "new_symbol": {
+          "title": "New Symbol",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "old_symbol",
+        "new_symbol",
+        "claim_id"
+      ],
+      "title": "ApiMappingItem",
+      "type": "object"
+    },
+    "BaselineOutcome": {
+      "description": "Outcome of running target tests out-of-the-box.",
+      "enum": [
+        "PASS_AS_DECLARED",
+        "FAIL_AS_DECLARED",
+        "PASS_AFTER_MINIMAL_FIX",
+        "NO_TESTS",
+        "NOT_RUN"
+      ],
+      "title": "BaselineOutcome",
+      "type": "string"
+    },
+    "BaselineRun": {
+      "additionalProperties": false,
+      "description": "Observed baseline test suite results on the unmigrated repository.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/BaselineOutcome",
+          "default": "NOT_RUN"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Claim Ids",
+          "type": "array"
+        },
+        "minimal_fix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimal Fix"
+        }
+      },
+      "title": "BaselineRun",
+      "type": "object"
+    },
+    "BlastRadius": {
+      "additionalProperties": false,
+      "description": "Aggregate statistics on dependency blast radius.",
+      "properties": {
+        "files_touched": {
+          "default": 0,
+          "title": "Files Touched",
+          "type": "integer"
+        },
+        "total_source_files": {
+          "default": 0,
+          "title": "Total Source Files",
+          "type": "integer"
+        },
+        "call_sites": {
+          "default": 0,
+          "title": "Call Sites",
+          "type": "integer"
+        },
+        "test_sites": {
+          "default": 0,
+          "title": "Test Sites",
+          "type": "integer"
+        },
+        "source_sites": {
+          "default": 0,
+          "title": "Source Sites",
+          "type": "integer"
+        }
+      },
+      "title": "BlastRadius",
+      "type": "object"
+    },
+    "Claim": {
+      "additionalProperties": false,
+      "description": "A discrete proposition tracked in the sacred trust ledger.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "trust_level": {
+          "$ref": "#/$defs/TrustLevel"
+        },
+        "source": {
+          "$ref": "#/$defs/ClaimSource"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "model_info": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supersedes"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "trust_level",
+        "source"
+      ],
+      "title": "Claim",
+      "type": "object"
+    },
+    "ClaimSource": {
+      "description": "Origin of a claim.",
+      "enum": [
+        "TOOL",
+        "MODEL",
+        "HUMAN"
+      ],
+      "title": "ClaimSource",
+      "type": "string"
+    },
+    "CompatibilityGap": {
+      "additionalProperties": false,
+      "description": "A behavioral divergence or missing capability between old and new dependencies.",
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "severity",
+        "claim_id"
+      ],
+      "title": "CompatibilityGap",
+      "type": "object"
+    },
+    "DeclaredSpecifier": {
+      "additionalProperties": false,
+      "description": "A dependency version constraint declared in a project manifest.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "specifier": {
+          "title": "Specifier",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "specifier"
+      ],
+      "title": "DeclaredSpecifier",
+      "type": "object"
+    },
+    "DependencyInfo": {
+      "additionalProperties": false,
+      "description": "Dependency under analysis.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "ecosystem": {
+          "default": "pypi",
+          "title": "Ecosystem",
+          "type": "string"
+        },
+        "declared_specifiers": {
+          "items": {
+            "$ref": "#/$defs/DeclaredSpecifier"
+          },
+          "title": "Declared Specifiers",
+          "type": "array"
+        },
+        "resolved_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Version"
+        },
+        "manifest_divergence": {
+          "default": false,
+          "title": "Manifest Divergence",
+          "type": "boolean"
+        },
+        "divergence_details": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Divergence Details"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "DependencyInfo",
+      "type": "object"
+    },
+    "EnvironmentInfo": {
+      "additionalProperties": false,
+      "description": "Execution environment details.",
+      "properties": {
+        "python_version": {
+          "title": "Python Version",
+          "type": "string"
+        },
+        "platform": {
+          "title": "Platform",
+          "type": "string"
+        },
+        "uv_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uv Version"
+        }
+      },
+      "required": [
+        "python_version",
+        "platform"
+      ],
+      "title": "EnvironmentInfo",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "An immutable, content-addressed artifact stored in the evidence store.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "path",
+        "sha256",
+        "size_bytes",
+        "created_at",
+        "description"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "description": "Categorization of evidence payloads.",
+      "enum": [
+        "HTTP_RESPONSE",
+        "COMMAND_OUTPUT",
+        "TEST_RUN",
+        "FILE_SNAPSHOT",
+        "TOOL_CALL_LOG",
+        "MODEL_RESPONSE",
+        "DIFF",
+        "OTHER"
+      ],
+      "title": "EvidenceKind",
+      "type": "string"
+    },
+    "ExecutedResult": {
+      "additionalProperties": false,
+      "description": "Outcome of executing a baseline, migrated, or differential test suite.",
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/RunLabel"
+        },
+        "python_version": {
+          "title": "Python Version",
+          "type": "string"
+        },
+        "passed": {
+          "default": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "failed": {
+          "default": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "errors": {
+          "default": 0,
+          "title": "Errors",
+          "type": "integer"
+        },
+        "skipped": {
+          "default": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "duration_seconds": {
+          "default": 0.0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "exit_code": {
+          "default": 0,
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Id"
+        },
+        "claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Id"
+        }
+      },
+      "required": [
+        "label",
+        "python_version"
+      ],
+      "title": "ExecutedResult",
+      "type": "object"
+    },
+    "MigrationStep": {
+      "additionalProperties": false,
+      "description": "An ordered action item in the proposed migration plan.",
+      "properties": {
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "order",
+        "description",
+        "claim_id"
+      ],
+      "title": "MigrationStep",
+      "type": "object"
+    },
+    "ModelInfo": {
+      "additionalProperties": false,
+      "description": "Metadata describing the AI model and invocation context.",
+      "properties": {
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "backend": {
+          "enum": [
+            "google",
+            "ollama",
+            "mock"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "access_method": {
+          "title": "Access Method",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "is_mock": {
+          "default": false,
+          "title": "Is Mock",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "model_id",
+        "backend",
+        "access_method",
+        "timestamp"
+      ],
+      "title": "ModelInfo",
+      "type": "object"
+    },
+    "Proposal": {
+      "additionalProperties": false,
+      "description": "Gemma-proposed migration plan and compatibility shim.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ProposalKind"
+        },
+        "replacement_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replacement Name"
+        },
+        "target_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Version"
+        },
+        "rationale_claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rationale Claim Ids",
+          "type": "array"
+        },
+        "api_mapping": {
+          "items": {
+            "$ref": "#/$defs/ApiMappingItem"
+          },
+          "title": "Api Mapping",
+          "type": "array"
+        },
+        "migration_steps": {
+          "items": {
+            "$ref": "#/$defs/MigrationStep"
+          },
+          "title": "Migration Steps",
+          "type": "array"
+        },
+        "shim_files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Shim Files",
+          "type": "array"
+        },
+        "assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Assumptions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Proposal",
+      "type": "object"
+    },
+    "ProposalKind": {
+      "description": "Categorization of migration proposals.",
+      "enum": [
+        "UPGRADE",
+        "REPLACE",
+        "REMOVE_OR_VENDOR"
+      ],
+      "title": "ProposalKind",
+      "type": "string"
+    },
+    "RiskSignal": {
+      "additionalProperties": false,
+      "description": "A scored risk indicator backed by evidence.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SignalStatus",
+          "default": "AVAILABLE"
+        },
+        "points": {
+          "default": 0,
+          "title": "Points",
+          "type": "integer"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Id"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "detail"
+      ],
+      "title": "RiskSignal",
+      "type": "object"
+    },
+    "RunLabel": {
+      "description": "Execution context for test runs.",
+      "enum": [
+        "BASELINE",
+        "MIGRATED",
+        "DIFFERENTIAL"
+      ],
+      "title": "RunLabel",
+      "type": "string"
+    },
+    "SignalStatus": {
+      "description": "Availability of an evidence signal.",
+      "enum": [
+        "AVAILABLE",
+        "UNAVAILABLE"
+      ],
+      "title": "SignalStatus",
+      "type": "string"
+    },
+    "SuggestedTest": {
+      "additionalProperties": false,
+      "description": "A proposed test case to verify migration equivalence.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "claim_id"
+      ],
+      "title": "SuggestedTest",
+      "type": "object"
+    },
+    "TargetInfo": {
+      "additionalProperties": false,
+      "description": "Target repository reference and integrity fingerprint.",
+      "properties": {
+        "repo_ref": {
+          "title": "Repo Ref",
+          "type": "string"
+        },
+        "git_commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Commit"
+        },
+        "tree_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tree Fingerprint"
+        }
+      },
+      "required": [
+        "repo_ref"
+      ],
+      "title": "TargetInfo",
+      "type": "object"
+    },
+    "TrustLevel": {
+      "description": "Trust levels for statements in the ledger.",
+      "enum": [
+        "OBSERVED",
+        "AI_PROPOSED",
+        "AI_PROPOSED_VERIFIED",
+        "AI_PROPOSED_REFUTED",
+        "UNVERIFIED"
+      ],
+      "title": "TrustLevel",
+      "type": "string"
+    },
+    "UsageLocation": {
+      "additionalProperties": false,
+      "description": "A site where the target code consumes the dependency.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "line": {
+          "title": "Line",
+          "type": "integer"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "snippet": {
+          "title": "Snippet",
+          "type": "string"
+        },
+        "is_test": {
+          "default": false,
+          "title": "Is Test",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "symbol",
+        "snippet"
+      ],
+      "title": "UsageLocation",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level Dependency Exit Capsule container.",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "capsule_id": {
+      "title": "Capsule Id",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "exitkit_version": {
+      "default": "0.1.0",
+      "title": "Exitkit Version",
+      "type": "string"
+    },
+    "synthetic": {
+      "default": false,
+      "title": "Synthetic",
+      "type": "boolean"
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentInfo"
+    },
+    "target": {
+      "$ref": "#/$defs/TargetInfo"
+    },
+    "dependency": {
+      "$ref": "#/$defs/DependencyInfo"
+    },
+    "risk_indicators": {
+      "items": {
+        "$ref": "#/$defs/RiskSignal"
+      },
+      "title": "Risk Indicators",
+      "type": "array"
+    },
+    "risk_score": {
+      "default": 0,
+      "title": "Risk Score",
+      "type": "integer"
+    },
+    "usage_locations": {
+      "items": {
+        "$ref": "#/$defs/UsageLocation"
+      },
+      "title": "Usage Locations",
+      "type": "array"
+    },
+    "blast_radius": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BlastRadius"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "baseline": {
+      "$ref": "#/$defs/BaselineRun"
+    },
+    "proposal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Proposal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "suggested_tests": {
+      "items": {
+        "$ref": "#/$defs/SuggestedTest"
+      },
+      "title": "Suggested Tests",
+      "type": "array"
+    },
+    "executed_results": {
+      "items": {
+        "$ref": "#/$defs/ExecutedResult"
+      },
+      "title": "Executed Results",
+      "type": "array"
+    },
+    "compatibility_gaps": {
+      "items": {
+        "$ref": "#/$defs/CompatibilityGap"
+      },
+      "title": "Compatibility Gaps",
+      "type": "array"
+    },
+    "open_concerns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Open Concerns",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "model_info": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ModelInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "claims": {
+      "items": {
+        "$ref": "#/$defs/Claim"
+      },
+      "title": "Claims",
+      "type": "array"
+    },
+    "evidence": {
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      },
+      "title": "Evidence",
+      "type": "array"
+    }
+  },
+  "title": "Capsule",
+  "type": "object"
+}
