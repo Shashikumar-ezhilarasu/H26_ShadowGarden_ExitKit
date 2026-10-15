@@ -209,6 +209,10 @@ class EvidenceStore:
         """Retrieve evidence metadata by ID if stored in this session."""
         return self._registry.get(evidence_id)
 
+    def all(self) -> list[Evidence]:
+        """Return all registered evidence items in this store."""
+        return list(self._registry.values())
+
     def get_content_bytes(self, evidence: Evidence) -> bytes:
         """Read the raw content bytes of an evidence file."""
         file_path = self.evidence_dir / evidence.path

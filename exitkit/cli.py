@@ -14,6 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from exitkit import __version__
+from exitkit.capsule import build_capsule, verify_capsule
 from exitkit.compare import ReadinessTier, run_comparison
 from exitkit.config import check_env_status
 from exitkit.ledger.models import Capsule, ProposalKind
@@ -995,6 +996,187 @@ def compare(
                 f"[dim]{tr.claim.id}[/dim]",
             )
         console.print(triage_table)
+
+
+@app.command()
+def capsule(
+    run_or_repo: Annotated[
+        str,
+        typer.Argument(
+            help="Path to an evidence run directory or target repository.",
+        ),
+    ],
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Destination path for the capsule bundle.",
+        ),
+    ] = None,
+    tar: Annotated[
+        bool,
+        typer.Option(
+            "--tar",
+            help="Bundle the capsule as a compressed .tar.gz archive.",
+        ),
+    ] = False,
+    dep: Annotated[
+        str | None,
+        typer.Option(
+            "--dep",
+            "-d",
+            help="Dependency name if creating from target repository.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Output capsule path and manifest as JSON.",
+        ),
+    ] = False,
+) -> None:
+    """Bundle analysis, evidence receipts, patch, and checksum manifest into an Exit Capsule."""
+    target_path = Path(run_or_repo).resolve()
+    if not target_path.exists():
+        console.print(f"[bold red]Error:[/bold red] Path '{run_or_repo}' does not exist.")
+        raise typer.Exit(code=1)
+
+    effective_run_dir = target_path
+    target_repo = None
+    has_store = (target_path / "evidence_store.json").exists()
+    has_verif = (target_path / "verification.json").exists()
+    if not has_store and not has_verif:
+        # Treat as repo path: look for latest run under .exitkit/runs/
+        runs_dir = target_path / ".exitkit" / "runs"
+        if runs_dir.exists() and any(runs_dir.iterdir()):
+            latest_run = max(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+            effective_run_dir = latest_run
+            target_repo = target_path
+        else:
+            console.print(
+                f"[bold red]Error:[/bold red] No runs found in '{target_path}'. "
+                "Run compare or sandbox first."
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        capsule_path = build_capsule(
+            run_dir=effective_run_dir,
+            target_repo=target_repo,
+            dep_name=dep,
+            output_dir=output,
+            archive=tar,
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Capsule build error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        res_dict = {
+            "capsule_path": str(capsule_path),
+            "format": "tar.gz" if tar else "dir",
+        }
+        typer.echo(json.dumps(res_dict, indent=2))
+        return
+
+    summary_text = (
+        f"[bold]Capsule Path:[/bold] [cyan]{capsule_path}[/cyan]\n"
+        f"[bold]Format:[/bold] {'tar.gz archive' if tar else 'directory'}\n"
+        f"[bold]Source Run:[/bold] [dim]{effective_run_dir}[/dim]\n"
+        f"[bold]Manifest:[/bold] [green]SHA256SUMS generated and signed[/green]"
+    )
+    console.print(
+        Panel(
+            summary_text,
+            title="Dependency Exit Capsule Created",
+            border_style="green",
+            expand=True,
+        )
+    )
+
+
+@app.command()
+def verify(
+    capsule_path: Annotated[
+        str,
+        typer.Argument(
+            help="Path to Dependency Exit Capsule directory or .tar.gz archive.",
+        ),
+    ],
+    replay: Annotated[
+        bool,
+        typer.Option(
+            "--replay",
+            help="Replay differential parity test suite against receipts.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Output verification result as JSON.",
+        ),
+    ] = False,
+) -> None:
+    """Verify an offline Dependency Exit Capsule against receipt hashes and trust ledger rules."""
+    target_path = Path(capsule_path).resolve()
+    if not target_path.exists():
+        console.print(f"[bold red]Error:[/bold red] Capsule path '{capsule_path}' does not exist.")
+        raise typer.Exit(code=1)
+
+    res = verify_capsule(target_path, replay=replay)
+
+    if json_output:
+        typer.echo(json.dumps(res.model_dump(mode="json"), indent=2))
+        if not res.is_valid:
+            raise typer.Exit(code=1)
+        return
+
+    border_color = "green" if res.is_valid else "red"
+    status_markup = (
+        f"[bold green]{res.status.value}[/bold green]"
+        if res.is_valid
+        else f"[bold red]{res.status.value}[/bold red]"
+    )
+
+    mock_str = "[yellow]True (MOCK)[/yellow]" if res.synthetic else "[green]False (REAL)[/green]"
+    summary_text = (
+        f"[bold]Capsule ID:[/bold] {res.capsule_id}\n"
+        f"[bold]Verification Status:[/bold] {status_markup}\n"
+        f"[bold]Synthetic (Mock) Flag:[/bold] {mock_str}\n"
+        f"[bold]Capsule Path:[/bold] [dim]{res.capsule_path}[/dim]"
+    )
+
+    console.print(
+        Panel(
+            summary_text,
+            title=f"ExitKit Capsule Audit: {res.capsule_id}",
+            border_style=border_color,
+            expand=True,
+        )
+    )
+
+    # Verification Checks Table
+    checks_table = Table(
+        title="Audit Checks & Receipt Validations",
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+    )
+    checks_table.add_column("Check Name", style="bold", width=28)
+    checks_table.add_column("Result", justify="center", width=10)
+    checks_table.add_column("Message / Hash Audit", ratio=1)
+
+    for chk in res.checks:
+        res_str = "[bold green]PASS[/bold green]" if chk.passed else "[bold red]FAIL[/bold red]"
+        checks_table.add_row(chk.name, res_str, chk.message)
+
+    console.print(checks_table)
+
+    if not res.is_valid:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
