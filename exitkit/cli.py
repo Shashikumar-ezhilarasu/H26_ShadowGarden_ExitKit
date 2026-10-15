@@ -17,6 +17,8 @@ from exitkit import __version__
 from exitkit.config import check_env_status
 from exitkit.ledger.models import Capsule
 from exitkit.scan.scanner import run_scan
+from exitkit.usage.analyzer import map_repository_usage
+from exitkit.usage.models import CriticalPathLevel, UsageKind
 
 app = typer.Typer(
     name="exitkit",
@@ -323,6 +325,132 @@ def scan(
     console.print(
         f"[bold green]target unchanged[/bold green] (fingerprint {result.tree_fingerprint[:16]}...)"
     )
+
+
+@app.command("usage")
+def usage_cmd(
+    repo_path: Annotated[
+        str,
+        typer.Argument(help="Path to local target Python repository to map."),
+    ],
+    dep: Annotated[
+        str | None,
+        typer.Option("--dep", "-d", help="Filter analysis to a specific dependency name."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output full usage report as canonical JSON."),
+    ] = False,
+) -> None:
+    """Map AST dependency usage, API surface, and blast radius across target repository."""
+    try:
+        report = map_repository_usage(repo_path, target_dep=dep)
+    except Exception as exc:
+        console.print(f"[bold red]Error running usage analysis:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        console.print(json.dumps(report.model_dump(mode="json"), indent=2))
+        return
+
+    if not report.usages:
+        console.print(f"[yellow]No dependency usage found in {report.target_path}[/yellow]")
+        return
+
+    # Blast Radius Summary Table
+    table = Table(
+        title=f"ExitKit Dependency Usage & Blast Radius: {report.target_path}",
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+    )
+    table.add_column("Dependency", style="bold", min_width=12)
+    table.add_column("Files", justify="right", width=6)
+    table.add_column("Share", justify="right", width=7)
+    table.add_column("Calls", justify="right", width=6)
+    table.add_column("Critical Path", justify="center", width=14)
+    table.add_column("API Surface (Symbols Used)", ratio=1)
+
+    level_colors = {
+        CriticalPathLevel.CRITICAL: "[bold red]CRITICAL[/bold red]",
+        CriticalPathLevel.HIGH: "[red]HIGH[/red]",
+        CriticalPathLevel.MEDIUM: "[yellow]MEDIUM[/yellow]",
+        CriticalPathLevel.LOW: "[green]LOW[/green]",
+    }
+
+    for dist_name, u in report.usages.items():
+        blast = u.blast_radius
+        lvl_str = level_colors.get(blast.critical_path_level, str(blast.critical_path_level.value))
+        sym_str = (
+            ", ".join(u.symbols_used[:5]) if u.symbols_used else "[dim]No active symbols[/dim]"
+        )
+        if len(u.symbols_used) > 5:
+            sym_str += f" (+{len(u.symbols_used) - 5} more)"
+
+        table.add_row(
+            dist_name,
+            str(blast.files_touched_count),
+            f"{blast.files_touched_share:.1%}",
+            str(blast.total_call_sites),
+            lvl_str,
+            sym_str,
+        )
+
+    console.print(table)
+
+    # Detailed Usage Sites Table
+    if dep:
+        filter_key = dep.lower().replace("-", "_")
+        matching = [
+            u
+            for k, u in report.usages.items()
+            if k == dep.lower() or k.replace("-", "_") == filter_key
+        ]
+        if not matching:
+            console.print(f"[yellow]No usage sites found for dependency '{dep}'.[/yellow]")
+            return
+
+        for u in matching:
+            if not u.sites:
+                console.print(f"[dim]No usage sites detected for {u.distribution_name}.[/dim]")
+                continue
+
+            site_table = Table(
+                title=(
+                    f"Code Usage Sites: {u.distribution_name} "
+                    f"({len(u.sites)} sites across {len(u.files_touched)} files)"
+                ),
+                show_header=True,
+                header_style="bold magenta",
+                expand=True,
+            )
+            site_table.add_column("Kind", width=8)
+            site_table.add_column("Location", style="dim", width=22)
+            site_table.add_column("Symbol", style="bold", min_width=18, ratio=2)
+            site_table.add_column("Code Snippet", ratio=3)
+
+            kind_colors = {
+                UsageKind.IMPORT: "[blue]IMPORT[/blue]",
+                UsageKind.CALL: "[bold green]CALL[/bold green]",
+                UsageKind.ATTRIBUTE_ACCESS: "[yellow]ATTR[/yellow]",
+                UsageKind.TYPE_ANNOTATION: "[magenta]TYPE[/magenta]",
+            }
+
+            for site in u.sites:
+                k_str = kind_colors.get(site.kind, site.kind.value)
+                loc_str = f"{site.file}:{site.line}"
+                site_table.add_row(
+                    k_str,
+                    loc_str,
+                    site.symbol,
+                    f"[dim]{site.snippet}[/dim]",
+                )
+            console.print(site_table)
+    else:
+        console.print(
+            "[dim]Tip: Use 'exitkit usage <repo> --dep <name>' to inspect exact code snippets "
+            "and call sites.[/dim]"
+        )
 
 
 if __name__ == "__main__":

@@ -89,6 +89,24 @@ uv run exitkit scan ./path/to/target --offline
 
 For the complete signal scoring breakdown, see [Risk Model Documentation](docs/RISK_MODEL.md).
 
+### 5. Map Dependency Usage & Blast Radius
+
+Perform static AST analysis to map exact call sites, imported symbols, attribute access, and blast radius across target repositories:
+
+```bash
+# Map usage and blast radius across all dependencies
+uv run exitkit usage ./path/to/target
+
+# Filter to a specific dependency and view exact code snippets and call sites
+uv run exitkit usage ./path/to/target --dep requests
+uv run exitkit usage ./path/to/target --dep appdirs
+uv run exitkit usage ./path/to/target --dep toml
+uv run exitkit usage ./path/to/target --dep jinja2
+
+# Output canonical JSON report
+uv run exitkit usage ./path/to/target --dep requests --json
+```
+
 ---
 
 ## Development & Testing
