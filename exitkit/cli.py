@@ -14,6 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from exitkit import __version__
+from exitkit.compare import ReadinessTier, run_comparison
 from exitkit.config import check_env_status
 from exitkit.ledger.models import Capsule, ProposalKind
 from exitkit.llm.client import ModelError
@@ -766,6 +767,234 @@ def sandbox_cmd(
     receipt_table.add_row("Patch Evidence", res.patch_evidence_id)
     receipt_table.add_row("Run Directory", res.run_dir)
     console.print(receipt_table)
+
+
+@app.command()
+def compare(
+    repo: Annotated[
+        str,
+        typer.Argument(
+            help="Path to repository or local folder to analyze.",
+        ),
+    ],
+    dep: Annotated[
+        str,
+        typer.Option(
+            "--dep",
+            "-d",
+            help="Name of the dependency to compare and evaluate exit readiness for.",
+        ),
+    ],
+    backend: Annotated[
+        str | None,
+        typer.Option(
+            "--backend",
+            "-b",
+            help="LLM backend for gap triage: google, ollama, or mock.",
+        ),
+    ] = None,
+    python: Annotated[
+        str,
+        typer.Option(
+            "--python",
+            "-p",
+            help="Target Python version (3.12 or 3.13).",
+        ),
+    ] = "3.12",
+    run_dir: Annotated[
+        str | None,
+        typer.Option(
+            "--run-dir",
+            help="Evidence run directory containing verification.json (or creates a new run).",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit output as raw JSON.",
+        ),
+    ] = False,
+) -> None:
+    """Compare baseline vs migrated outputs, triage gaps with Gemma, and compute Exit Readiness."""
+    target_path = Path(repo).resolve()
+    if not target_path.exists():
+        console.print(f"[bold red]Error:[/bold red] Repository path '{repo}' does not exist.")
+        raise typer.Exit(code=1)
+
+    effective_backend = cast(Literal["google", "ollama", "mock"], backend) if backend else None
+
+    try:
+        report = run_comparison(
+            repo_path=target_path,
+            dep_name=dep,
+            backend=effective_backend,
+            python_version=python,
+            run_dir=run_dir,
+        )
+    except ModelError as err:
+        console.print(f"[bold red]LLM Error:[/bold red] {err}")
+        raise typer.Exit(code=1) from err
+    except Exception as err:
+        console.print(f"[bold red]Comparison Error:[/bold red] {err}")
+        raise typer.Exit(code=1) from err
+
+    if json_output:
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
+        return
+
+    # Render Terminal UI
+    tier = report.breakdown.tier
+    if tier == ReadinessTier.READY_FOR_EXIT:
+        border_style = "green"
+        tier_markup = "[bold green]READY_FOR_EXIT[/bold green]"
+    elif tier == ReadinessTier.NEEDS_SHIM_OR_REVIEW:
+        border_style = "yellow"
+        tier_markup = "[bold yellow]NEEDS_SHIM_OR_REVIEW[/bold yellow]"
+    else:
+        border_style = "red"
+        tier_markup = "[bold red]HIGH_RISK_GAPS[/bold red]"
+
+    summary_text = (
+        f"[bold]Target Dependency:[/bold] [cyan]{report.target_dependency}[/cyan]\n"
+        f"[bold]Proposed Migration:[/bold] [magenta]{report.proposed_package}[/magenta]\n"
+        f"[bold]Exit Readiness Score:[/bold] "
+        f"[bold {border_style}]{report.readiness_score}/100[/bold {border_style}]\n"
+        f"[bold]Recommendation Tier:[/bold] {tier_markup}\n"
+        f"[bold]Run Directory:[/bold] [dim]{report.run_dir}[/dim]"
+    )
+
+    console.print(
+        Panel(
+            summary_text,
+            title=f"ExitKit Readiness Assessment: {report.target_dependency}",
+            border_style=border_style,
+            expand=True,
+        )
+    )
+
+    # Score Breakdown Table
+    breakdown_table = Table(
+        title="Exit Readiness Score Breakdown (Evidence-Only)",
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+    )
+    breakdown_table.add_column("Evaluation Criterion", style="bold", width=30)
+    breakdown_table.add_column("Points", justify="right", width=10)
+    breakdown_table.add_column("Max", justify="right", width=8)
+    breakdown_table.add_column("Verification Basis / Details", ratio=1)
+
+    bd = report.breakdown
+    breakdown_table.add_row(
+        "Test Suite Regression",
+        str(bd.test_suite_score),
+        "30",
+        "Observed pass/fail counts in isolated virtualenv sandbox",
+    )
+    breakdown_table.add_row(
+        "Differential Parity",
+        str(bd.differential_score),
+        "30",
+        "Execution parity across side-by-side differential test cases",
+    )
+    breakdown_table.add_row(
+        "Python 3.12 / 3.13 Support",
+        str(bd.python_support_score),
+        "20",
+        "Dual-runtime execution check and installation capability",
+    )
+    breakdown_table.add_row(
+        "API Surface Coverage",
+        str(bd.api_surface_score),
+        "20",
+        "AST symbol coverage without unsupported API runtime calls",
+    )
+    breakdown_table.add_row(
+        "Gap Penalties",
+        str(bd.gap_penalties),
+        "0",
+        "Deductions for blockers (-30), high (-15), medium (-5), low (-2)",
+    )
+    breakdown_table.add_row(
+        "[bold]TOTAL EXIT READINESS[/bold]",
+        f"[bold {border_style}]{bd.total_score}[/bold {border_style}]",
+        "100",
+        f"[bold]{bd.tier.value}[/bold] ({bd.explanation})",
+    )
+    console.print(breakdown_table)
+
+    # Compatibility Gaps Table
+    if report.gaps:
+        gap_table = Table(
+            title=f"Discovered Compatibility Gaps ({len(report.gaps)})",
+            show_header=True,
+            header_style="bold red",
+            expand=True,
+        )
+        gap_table.add_column("Gap ID", style="bold", width=16)
+        gap_table.add_column("Category", width=22)
+        gap_table.add_column("Severity", justify="center", width=12)
+        gap_table.add_column("Description", ratio=2)
+        gap_table.add_column("Affected Symbol / File", ratio=1)
+        gap_table.add_column("Evidence ID", width=16)
+
+        for g in report.gaps:
+            sev_color = "bold red" if g.severity == "BLOCKER" else "yellow"
+            sym_file = f"{g.affected_file or ''} {g.affected_symbol or ''}".strip() or "N/A"
+            gap_table.add_row(
+                g.id,
+                g.category.value,
+                f"[{sev_color}]{g.severity.value}[/{sev_color}]",
+                g.description,
+                sym_file,
+                f"[dim]{g.evidence_id}[/dim]",
+            )
+        console.print(gap_table)
+
+    # Honest Limitations Table
+    if report.limitations:
+        lim_table = Table(
+            title=f"Honest Limitations Disclosed ({len(report.limitations)})",
+            show_header=True,
+            header_style="bold yellow",
+            expand=True,
+        )
+        lim_table.add_column("Limitation ID", style="bold", width=22)
+        lim_table.add_column("Category", width=20)
+        lim_table.add_column("Scope", width=16)
+        lim_table.add_column("Description", ratio=1)
+
+        for lim in report.limitations:
+            lim_table.add_row(
+                lim.id,
+                lim.category.value,
+                lim.affected_scope or "N/A",
+                lim.description,
+            )
+        console.print(lim_table)
+
+    # Gemma Gap Triage Table
+    if report.triages:
+        triage_table = Table(
+            title=f"Gemma 4 Compatibility Gap Triage ({len(report.triages)})",
+            show_header=True,
+            header_style="bold magenta",
+            expand=True,
+        )
+        triage_table.add_column("Gap ID", style="bold", width=16)
+        triage_table.add_column("Root Cause Analysis", ratio=2)
+        triage_table.add_column("Suggested Fix / Shim", ratio=2)
+        triage_table.add_column("Claim ID", width=22)
+
+        for tr in report.triages:
+            triage_table.add_row(
+                tr.gap_id,
+                tr.cause,
+                tr.suggested_fix,
+                f"[dim]{tr.claim.id}[/dim]",
+            )
+        console.print(triage_table)
 
 
 if __name__ == "__main__":

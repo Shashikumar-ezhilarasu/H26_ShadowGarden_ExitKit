@@ -38,6 +38,20 @@ class BaseModelClient(ABC):
             tuple of (MigrationProposal, raw_response_bytes, ModelInfo)
         """
 
+    @abstractmethod
+    def generate_gap_triage(
+        self,
+        gap_id: str,
+        category: str,
+        description: str,
+        failing_context: str | None = None,
+    ) -> tuple[str, str, ModelInfo]:
+        """Generate root cause and suggested fix triage for an observed gap.
+
+        Returns:
+            tuple of (cause, suggested_fix, ModelInfo)
+        """
+
 
 class GoogleGenAIClient(BaseModelClient):
     """Client for Google GenAI / Gemini API supporting bounded JSON schema generation."""
@@ -106,6 +120,72 @@ class GoogleGenAIClient(BaseModelClient):
             )
             return proposal, resp.content, model_info
 
+    def generate_gap_triage(
+        self,
+        gap_id: str,
+        category: str,
+        description: str,
+        failing_context: str | None = None,
+    ) -> tuple[str, str, ModelInfo]:
+        prompt = (
+            f"Analyze this compatibility gap observed during a Python dependency migration:\n"
+            f"Gap ID: {gap_id}\n"
+            f"Category: {category}\n"
+            f"Description: {description}\n"
+            f"Context / Error:\n{failing_context or 'N/A'}\n\n"
+            f"Identify the precise root cause and provide a minimal suggested code fix or shim."
+        )
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent"
+            f"?key={self.api_key}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "You are Gemma 4, an expert Python dependency migration assistant. "
+                            "Output only valid JSON with keys 'cause' (string) and "
+                            "'suggested_fix' (string)."
+                        )
+                    }
+                ]
+            },
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.1,
+            },
+        }
+
+        client_kwargs: dict[str, Any] = {"timeout": self.timeout}
+        if self.transport:
+            client_kwargs["transport"] = self.transport
+
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.post(url, json=payload)
+            if resp.status_code != 200:
+                raise ModelError(f"Google GenAI API error ({resp.status_code}): {resp.text}")
+
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise ModelError("Google GenAI returned no response candidates.")
+
+            text_content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+            triage_data = json.loads(text_content)
+            cause = str(triage_data.get("cause", "Unknown root cause"))
+            suggested_fix = str(triage_data.get("suggested_fix", "No fix suggested"))
+
+            model_info = ModelInfo(
+                model_id=self.model_id,
+                backend="google",
+                access_method="https://generativelanguage.googleapis.com/v1beta",
+                timestamp=datetime.now(UTC),
+                is_mock=False,
+            )
+            return cause, suggested_fix, model_info
+
 
 class OllamaClient(BaseModelClient):
     """Client for local Ollama server supporting structured JSON outputs."""
@@ -161,6 +241,64 @@ class OllamaClient(BaseModelClient):
                 is_mock=False,
             )
             return proposal, resp.content, model_info
+
+    def generate_gap_triage(
+        self,
+        gap_id: str,
+        category: str,
+        description: str,
+        failing_context: str | None = None,
+    ) -> tuple[str, str, ModelInfo]:
+        prompt = (
+            f"Analyze this compatibility gap observed during a Python dependency migration:\n"
+            f"Gap ID: {gap_id}\n"
+            f"Category: {category}\n"
+            f"Description: {description}\n"
+            f"Context / Error:\n{failing_context or 'N/A'}\n\n"
+            f"Identify the precise root cause and provide a minimal suggested code fix or "
+            f"adapter shim. Output JSON with keys 'cause' and 'suggested_fix'."
+        )
+        url = f"{self.host}/api/chat"
+        payload = {
+            "model": self.model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Gemma 4, an expert Python migration assistant. "
+                        "Output only valid JSON with keys 'cause' and 'suggested_fix'."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.1},
+        }
+
+        client_kwargs: dict[str, Any] = {"timeout": self.timeout}
+        if self.transport:
+            client_kwargs["transport"] = self.transport
+
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.post(url, json=payload)
+            if resp.status_code != 200:
+                raise ModelError(f"Ollama API error ({resp.status_code}): {resp.text}")
+
+            data = resp.json()
+            text_content = data.get("message", {}).get("content", "{}")
+            triage_data = json.loads(text_content)
+            cause = str(triage_data.get("cause", "Unknown root cause"))
+            suggested_fix = str(triage_data.get("suggested_fix", "No fix suggested"))
+
+            model_info = ModelInfo(
+                model_id=self.model_id,
+                backend="ollama",
+                access_method=self.host,
+                timestamp=datetime.now(UTC),
+                is_mock=False,
+            )
+            return cause, suggested_fix, model_info
 
 
 class MockModelClient(BaseModelClient):
@@ -259,6 +397,41 @@ class MockModelClient(BaseModelClient):
             is_mock=True,
         )
         return proposal, payload_bytes, model_info
+
+    def generate_gap_triage(
+        self,
+        gap_id: str,
+        category: str,
+        description: str,
+        failing_context: str | None = None,
+    ) -> tuple[str, str, ModelInfo]:
+        desc_lower = (description + " " + (failing_context or "")).lower()
+        if "soft_unicode" in desc_lower or "jinja2" in desc_lower:
+            cause = (
+                "[MOCK] Jinja2 2.11.3 attempts to import soft_unicode from markupsafe, "
+                "which was removed in MarkupSafe >= 2.1.0."
+            )
+            suggested_fix = "[MOCK] Upgrade Jinja2 to >=3.0.0 or pin markupsafe<2.1.0."
+        elif any(k in desc_lower for k in ("platformdirs", "appdirs", "user_data_dir")):
+            cause = (
+                "[MOCK] Parameter signature or return type difference between "
+                "appdirs and platformdirs."
+            )
+            suggested_fix = (
+                "[MOCK] Pass explicit appname and appauthor arguments or wrap in an adapter shim."
+            )
+        else:
+            cause = f"[MOCK] Root cause for {gap_id}: {description}"
+            suggested_fix = "[MOCK] Adapt invocation site or provide a backward-compatible shim."
+
+        model_info = ModelInfo(
+            model_id=self.model_id,
+            backend="mock",
+            access_method="in-memory-mock",
+            timestamp=datetime.now(UTC),
+            is_mock=True,
+        )
+        return cause, suggested_fix, model_info
 
 
 def get_model_client(
