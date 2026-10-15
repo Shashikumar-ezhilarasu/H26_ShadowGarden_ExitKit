@@ -6,7 +6,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
 import typer
 from rich.console import Console
@@ -15,7 +15,9 @@ from rich.table import Table
 
 from exitkit import __version__
 from exitkit.config import check_env_status
-from exitkit.ledger.models import Capsule
+from exitkit.ledger.models import Capsule, ProposalKind
+from exitkit.llm.client import ModelError
+from exitkit.llm.proposer import run_propose
 from exitkit.scan.scanner import run_scan
 from exitkit.usage.analyzer import map_repository_usage
 from exitkit.usage.models import CriticalPathLevel, UsageKind
@@ -138,6 +140,14 @@ def doctor() -> None:
             "Please resolve missing environment dependencies above."
         )
         console.print(Panel(fail_msg, title="Status", border_style="red"))
+
+    if not model_set:
+        console.print(
+            "\n[dim]Gemma Proposer Setup:[/dim]\n"
+            "  • Gemini API: export EXITKIT_GEMMA_MODEL=gemma-4-it (and GOOGLE_API_KEY)\n"
+            "  • Ollama:     export EXITKIT_GEMMA_MODEL=gemma:7b (--backend ollama)\n"
+            "  • Offline:    pass '--backend mock'"
+        )
 
 
 @app.command()
@@ -451,6 +461,142 @@ def usage_cmd(
             "[dim]Tip: Use 'exitkit usage <repo> --dep <name>' to inspect exact code snippets "
             "and call sites.[/dim]"
         )
+
+
+@app.command("propose")
+def propose_cmd(
+    repo_path_or_url: Annotated[
+        str,
+        typer.Argument(help="Path to local Python repository or remote git URL."),
+    ],
+    dep: Annotated[
+        str,
+        typer.Option("--dep", "-d", help="Target dependency name to propose migration for."),
+    ],
+    model: Annotated[
+        str | None,
+        typer.Option("--model", "-m", help="Model ID override (defaults to EXITKIT_GEMMA_MODEL)."),
+    ] = None,
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="LLM backend: google | ollama | mock."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", "-j", help="Output proposal and receipt claim as JSON."),
+    ] = False,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Custom output directory for run evidence and proposal."),
+    ] = None,
+) -> None:
+    """Generate an evidence-backed migration proposal for an at-risk dependency using Gemma 4."""
+    valid_backends = ("google", "ollama", "mock")
+    if backend and backend not in valid_backends:
+        backends_str = ", ".join(valid_backends)
+        console.print(
+            f"[bold red]Invalid backend:[/bold red] '{backend}'. Supported backends: {backends_str}"
+        )
+        raise typer.Exit(1)
+
+    try:
+        b_lit = cast(Literal["google", "ollama", "mock"] | None, backend)
+        res = run_propose(
+            repo_path=repo_path_or_url,
+            dep_name=dep,
+            model_id=model,
+            backend=b_lit,
+            run_dir=out,
+        )
+    except ModelError as exc:
+        console.print(f"[bold red]Gemma Configuration Error:[/bold red] {exc}")
+        console.print(
+            "\n[bold yellow]How to set up ExitKit Gemma Proposer:[/bold yellow]\n"
+            "  1. Export model ID: export EXITKIT_GEMMA_MODEL=gemma-4-it\n"
+            "  2. Export API key:  export GOOGLE_API_KEY=your_gemini_api_key\n"
+            "  Or for local Ollama: export EXITKIT_GEMMA_MODEL=gemma:7b and pass --backend ollama\n"
+            "  Or for mock testing: pass --backend mock"
+        )
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        console.print(f"[bold red]Proposer Error:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        typer.echo(json.dumps(res.model_dump(mode="json"), indent=2))
+        return
+
+    # Rich formatted output
+    kind_colors = {
+        ProposalKind.UPGRADE: "bold green",
+        ProposalKind.REPLACE: "bold yellow",
+        ProposalKind.REMOVE_OR_VENDOR: "bold red",
+    }
+    k_style = kind_colors.get(res.proposal.kind, "bold cyan")
+
+    # Proposal Panel
+    target_str = f"{res.proposal.proposed_package} {res.proposal.proposed_specifier}"
+    shim_str = "Yes" if res.proposal.expected_shim_needed else "No"
+    summary_text = (
+        f"[bold]Target Dependency:[/bold] {res.target_dependency}\n"
+        f"[bold]Strategy Kind:[/bold]     [{k_style}]{res.proposal.kind.value}[/{k_style}]\n"
+        f"[bold]Proposed Target:[/bold]   [bold cyan]{target_str}[/bold cyan]\n"
+        f"[bold]Confidence:[/bold]        {res.proposal.confidence * 100:.0f}%\n"
+        f"[bold]Shim Required:[/bold]     {shim_str}\n\n"
+        f"[bold]Architectural Rationale:[/bold]\n{res.proposal.rationale}"
+    )
+    console.print(
+        Panel(
+            summary_text,
+            title=f"ExitKit Migration Proposal: {res.target_dependency}",
+            border_style="cyan",
+            expand=True,
+        )
+    )
+
+    # Migration Steps Table
+    steps_table = Table(
+        title=f"Migration Transformation Steps ({len(res.proposal.migration_steps)} steps)",
+        show_header=True,
+        header_style="bold green",
+        expand=True,
+    )
+    steps_table.add_column("#", width=4, justify="right")
+    steps_table.add_column("Concrete Action Step", ratio=1)
+    for idx, step in enumerate(res.proposal.migration_steps, start=1):
+        steps_table.add_row(str(idx), step)
+    console.print(steps_table)
+
+    if res.proposal.shim_code:
+        console.print(
+            Panel(
+                res.proposal.shim_code,
+                title="Compatibility Shim Code",
+                border_style="yellow",
+            )
+        )
+
+    # Cryptographic Trust Ledger Receipt Table
+    receipt_table = Table(
+        title="Sacred Trust Ledger Receipt",
+        show_header=True,
+        header_style="bold magenta",
+        expand=True,
+    )
+    receipt_table.add_column("Property", style="dim", width=18)
+    receipt_table.add_column("Value")
+    receipt_table.add_row("Claim ID", f"[bold]{res.claim.id}[/bold]")
+    receipt_table.add_row("Trust Level", f"[yellow]{res.claim.trust_level.value}[/yellow]")
+    receipt_table.add_row("Claim Statement", res.claim.statement)
+    receipt_table.add_row("Evidence ID", f"[cyan]{res.evidence.id}[/cyan]")
+    receipt_table.add_row("Evidence Path", f"{res.run_dir}/evidence/{res.evidence.path}")
+    receipt_table.add_row("SHA256 Digest", f"[dim]{res.evidence.sha256}[/dim]")
+    receipt_table.add_row("Reasoner Model", res.model_info.model_id)
+    receipt_table.add_row(
+        "Backend / Access",
+        f"{res.model_info.backend} (is_mock={res.model_info.is_mock})",
+    )
+    console.print(receipt_table)
 
 
 if __name__ == "__main__":

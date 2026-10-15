@@ -107,6 +107,22 @@ uv run exitkit usage ./path/to/target --dep jinja2
 uv run exitkit usage ./path/to/target --dep requests --json
 ```
 
+### 6. Propose Dependency Migrations (Gemma 4 Bounded Reasoner)
+
+Generate an evidence-backed migration proposal implementing an **upgrade-first** strategy (upgrade within package first, replace second, vendor last):
+
+```bash
+# Propose migration for an at-risk dependency with Gemma 4
+uv run exitkit propose ./path/to/target --dep appdirs
+
+# Deterministic offline mock execution for testing (Rule 4 compliant)
+uv run exitkit propose ./path/to/target --dep appdirs --backend mock
+uv run exitkit propose ./path/to/target --dep jinja2 --backend mock
+
+# Output JSON machine receipt with sacred AI_PROPOSED claim and evidence pointer
+uv run exitkit propose ./path/to/target --dep appdirs --backend mock --json
+```
+
 ---
 
 ## Development & Testing
