@@ -18,6 +18,7 @@ from exitkit.config import check_env_status
 from exitkit.ledger.models import Capsule, ProposalKind
 from exitkit.llm.client import ModelError
 from exitkit.llm.proposer import run_propose
+from exitkit.sandbox import run_sandbox_verification
 from exitkit.scan.scanner import run_scan
 from exitkit.usage.analyzer import map_repository_usage
 from exitkit.usage.models import CriticalPathLevel, UsageKind
@@ -596,6 +597,174 @@ def propose_cmd(
         "Backend / Access",
         f"{res.model_info.backend} (is_mock={res.model_info.is_mock})",
     )
+    console.print(receipt_table)
+
+
+@app.command("sandbox")
+def sandbox_cmd(
+    repo_path_or_url: Annotated[
+        str,
+        typer.Argument(help="Path to local Python repository or remote git URL."),
+    ],
+    dep: Annotated[
+        str,
+        typer.Option("--dep", "-d", help="Target dependency to verify in sandbox."),
+    ],
+    python: Annotated[
+        str,
+        typer.Option("--python", "-p", help="Python version for sandbox (3.12 or 3.13)."),
+    ] = "3.12",
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Timeout in seconds for test execution."),
+    ] = 120.0,
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="LLM backend: google | ollama | mock."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", "-j", help="Output sandbox verification result as JSON."),
+    ] = False,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Custom output directory for run evidence and reports."),
+    ] = None,
+) -> None:
+    """Execute sandboxed baseline, migration, and differential testing with trust ledger updates."""
+    valid_backends = ("google", "ollama", "mock")
+    if backend and backend not in valid_backends:
+        backends_str = ", ".join(valid_backends)
+        console.print(
+            f"[bold red]Invalid backend:[/bold red] '{backend}'. Supported backends: {backends_str}"
+        )
+        raise typer.Exit(1)
+
+    try:
+        b_lit = cast(Literal["google", "ollama", "mock"] | None, backend)
+        res = run_sandbox_verification(
+            repo_path=repo_path_or_url,
+            dep_name=dep,
+            python_version=python,
+            timeout=timeout,
+            backend=b_lit,
+            run_dir=out,
+        )
+    except ModelError as exc:
+        console.print(f"[bold red]Gemma Configuration Error:[/bold red] {exc}")
+        console.print("\n[dim]To test without API keys, pass '--backend mock'.[/dim]")
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        console.print(f"[bold red]Sandbox Error:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        typer.echo(json.dumps(res.model_dump(mode="json"), indent=2))
+        return
+
+    # Visual Rich Presentation
+    status_style = "bold green" if res.verified else "bold red"
+    verdict_text = "VERIFIED" if res.verified else "REFUTED"
+    p_lvl = res.proposal_claim.trust_level.value
+    r_lvl = res.resulting_claim.trust_level.value
+
+    trans_str = f"[yellow]{p_lvl}[/yellow] -> [{status_style}]{r_lvl}[/{status_style}]"
+    summary_text = (
+        f"[bold]Target Dependency:[/bold]     {res.target_dependency}\n"
+        f"[bold]Sandbox Python:[/bold]        {res.python_version}\n"
+        f"[bold]Verification Verdict:[/bold]  [{status_style}]{verdict_text}[/{status_style}]\n"
+        f"[bold]Ledger Transition:[/bold]     {trans_str}\n\n"
+        f"[bold]Verdict Details:[/bold]\n{res.resulting_claim.note or 'N/A'}"
+    )
+    console.print(
+        Panel(
+            summary_text,
+            title=f"ExitKit Sandbox Verification: {res.target_dependency}",
+            border_style="green" if res.verified else "red",
+            expand=True,
+        )
+    )
+
+    # Test Execution Comparison Table
+    test_table = Table(
+        title="Test Execution Comparison (Baseline vs Migrated)",
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+    )
+    test_table.add_column("Stage", style="bold", width=12)
+    test_table.add_column("Status", width=10, justify="center")
+    test_table.add_column("Tests Ran", justify="right", width=10)
+    test_table.add_column("Passed", justify="right", width=8)
+    test_table.add_column("Failed", justify="right", width=8)
+    test_table.add_column("Duration", justify="right", width=10)
+    test_table.add_column("Evidence ID", ratio=1)
+
+    b_status = "[green]PASS[/green]" if res.baseline.passed else "[bold red]FAIL[/bold red]"
+    m_status = "[green]PASS[/green]" if res.migrated.passed else "[bold red]FAIL[/bold red]"
+
+    test_table.add_row(
+        "BASELINE",
+        b_status,
+        str(res.baseline.tests_ran),
+        str(res.baseline.passed_count),
+        str(res.baseline.failed_count + res.baseline.error_count),
+        f"{res.baseline.duration_seconds}s",
+        f"[dim]{res.baseline.evidence_id}[/dim]",
+    )
+    test_table.add_row(
+        "MIGRATED",
+        m_status,
+        str(res.migrated.tests_ran),
+        str(res.migrated.passed_count),
+        str(res.migrated.failed_count + res.migrated.error_count),
+        f"{res.migrated.duration_seconds}s",
+        f"[dim]{res.migrated.evidence_id}[/dim]",
+    )
+    console.print(test_table)
+
+    # Differential Test Results Table
+    diff_table = Table(
+        title=(
+            f"Differential Parity Suite: {res.target_dependency} vs "
+            f"{res.differential.replacement_dependency} "
+            f"({res.differential.matched_cases}/{res.differential.total_cases} matched)"
+        ),
+        show_header=True,
+        header_style="bold magenta",
+        expand=True,
+    )
+    diff_table.add_column("Case Name", style="bold", width=26)
+    diff_table.add_column("Parity", justify="center", width=8)
+    diff_table.add_column("Input Repr", ratio=1)
+    diff_table.add_column("Output Summary / Error", ratio=2)
+
+    for case in res.differential.cases:
+        p_str = "[green]MATCH[/green]" if case.matched else "[bold red]DIFF[/bold red]"
+        out_summary = case.replacement_output or case.replacement_error or "N/A"
+        diff_table.add_row(case.name, p_str, case.input_repr, out_summary)
+
+    console.print(diff_table)
+
+    # Trust Ledger Receipt
+    receipt_table = Table(
+        title="Sacred Trust Ledger Receipt",
+        show_header=True,
+        header_style="bold magenta",
+        expand=True,
+    )
+    receipt_table.add_column("Property", style="dim", width=18)
+    receipt_table.add_column("Value")
+    receipt_table.add_row("Claim ID", f"[bold]{res.resulting_claim.id}[/bold]")
+    receipt_table.add_row(
+        "Trust Level",
+        f"[{status_style}]{res.resulting_claim.trust_level.value}[/{status_style}]",
+    )
+    receipt_table.add_row("Claim Statement", res.resulting_claim.statement)
+    receipt_table.add_row("Supersedes", str(res.resulting_claim.supersedes))
+    receipt_table.add_row("Evidence IDs", ", ".join(res.resulting_claim.evidence_ids))
+    receipt_table.add_row("Patch Evidence", res.patch_evidence_id)
+    receipt_table.add_row("Run Directory", res.run_dir)
     console.print(receipt_table)
 
 
